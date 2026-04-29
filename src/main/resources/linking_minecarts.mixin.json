@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "net.lobster.linking_minecarts.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "linking_minecarts.refmap.json",
+  "mixins": [
+    "MixinAbstractMinecart"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
