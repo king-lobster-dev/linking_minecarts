@@ -124,3 +124,11 @@ tasks.named('compileJava').configure {
         }
     }
 }
+
+tasks.named('processResources').configure {
+    dependsOn('compileJava')
+}
+
+tasks.withType(Jar).configureEach {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

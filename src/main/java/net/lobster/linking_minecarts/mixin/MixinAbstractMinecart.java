@@ -2,7 +2,6 @@ package net.lobster.linking_minecarts.mixin;
 
 import net.lobster.linking_minecarts.capability.CartLinkData;
 import net.lobster.linking_minecarts.capability.ModCapabilities;
-import net.lobster.linking_minecarts.util.RailPathTracer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.vehicle.AbstractMinecart;
@@ -18,19 +17,13 @@ import java.util.Optional;
 @Mixin(AbstractMinecart.class)
 public abstract class MixinAbstractMinecart {
 
-    // No @Shadow declarations at all.
-    //
-    // The methods we need (level, getUUID, getDeltaMovement, etc.) are all
-    // inherited from Entity — the Mixin AP resolves them correctly in the tsrg
-    // but doesn't write inherited shadows into the refmap, causing the load failure.
-    //
-    // Instead, we cast `this` to AbstractMinecart once and call everything
-    // through that reference. Since this class IS AbstractMinecart at runtime,
-    // the cast is always safe and the compiler resolves the calls normally
-    // without any Mixin remapping involvement.
+    private static final double SPACING            = 1.5;
+    private static final double SPRING             = 0.12;
+    private static final double CORRECTION_THRESHOLD = 0.3;
+    private static final double CATCHUP_THRESHOLD  = SPACING * 1.8;
 
     // -------------------------------------------------------
-    // Tick tail injection
+    // Tick tail
     // -------------------------------------------------------
 
     @Inject(method = "tick", at = @At("TAIL"))
@@ -46,23 +39,36 @@ public abstract class MixinAbstractMinecart {
         if (selfData.getLeader() != null) return;   // not the head
         if (selfData.getFollower() == null) return; // no chain
 
-        linking_minecarts$propagate(self, self.getDeltaMovement(), serverLevel);
+        linking_minecarts$propagate(self, serverLevel);
     }
 
     // -------------------------------------------------------
-    // Chain propagation
+    // Speed propagation
     // -------------------------------------------------------
 
+    /**
+     * Propagates the leader's SPEED (not velocity vector) down the chain.
+     
+     * Each follower keeps its own velocity direction — the direction vanilla
+     * computed for it based on whichever rail block it's currently on.
+     * We only set how fast it moves along that direction.
+     
+     * This means each cart correctly navigates its own section of track
+     * independently, so carts on a bend turn correctly while carts still
+     * on the straight approach at the correct speed without being pulled
+     * sideways by the leader's direction.
+     
+     * Spring correction adjusts the follower's speed slightly when spacing
+     * drifts, expressed as a signed scalar along the follower's own travel axis.
+     */
     @Unique
     private void linking_minecarts$propagate(AbstractMinecart leader,
-                                             Vec3 headVel,
                                              ServerLevel level) {
-        final double SPACING = 1.5;
-        final int MAX_CHAIN = 64;
 
         AbstractMinecart current = leader;
+        int steps = 0;
 
-        for (int i = 0; i < MAX_CHAIN; i++) {
+        while (steps++ < 64) {
 
             CartLinkData data = linking_minecarts$getCap(current).orElse(null);
             if (data == null || data.getFollower() == null) break;
@@ -71,35 +77,69 @@ public abstract class MixinAbstractMinecart {
             if (!(entity instanceof AbstractMinecart follower)) break;
             if (follower.isRemoved()) break;
 
-            // Place follower at exact rail-distance SPACING behind current
-            Vec3 targetPos = RailPathTracer.findPositionBehind(current, SPACING, level);
+            Vec3 leaderVel   = current.getDeltaMovement();
+            Vec3 followerVel = follower.getDeltaMovement();
+            Vec3 leaderPos   = current.position();
+            Vec3 followerPos = follower.position();
 
-            if (targetPos != null) {
-                follower.setPos(targetPos.x, targetPos.y, targetPos.z);
+            // The scalar speed of the leader (always positive — sign handled below)
+            double leaderSpeed = leaderVel.length();
+
+            // --- Determine follower's travel direction ---
+            // Use the follower's current velocity direction if it's moving.
+            // If stationary, derive direction from chain geometry (leader → follower axis).
+            Vec3 followerDir;
+            if (followerVel.lengthSqr() > 0.00001) {
+                followerDir = followerVel.normalize();
+            } else if (leaderSpeed > 0.00001) {
+                // Follower is stopped but leader is moving — point away from leader
+                // along the chain. Vanilla will correct this to the actual rail
+                // direction on the next tick.
+                Vec3 axis = followerPos.subtract(leaderPos);
+                followerDir = axis.lengthSqr() > 0.00001
+                        ? axis.normalize()
+                        : leaderVel.normalize().scale(-1);
             } else {
-                // Fallback: no rail data — offset straight behind using head velocity
-                Vec3 dir;
-                if (headVel.lengthSqr() > 0.0001) {
-                    dir = headVel.normalize();
-                } else {
-                    Vec3 delta = current.position().subtract(follower.position());
-                    dir = delta.lengthSqr() > 0.0001 ? delta.normalize() : Vec3.ZERO;
-                }
-                if (dir.lengthSqr() > 0.0001) {
-                    Vec3 fallback = current.position().subtract(dir.scale(SPACING));
-                    follower.setPos(fallback.x, fallback.y, fallback.z);
-                }
+                // Both stopped — nothing to do
+                current = follower;
+                continue;
             }
 
-            // All followers move at exactly the head's velocity
-            follower.setDeltaMovement(headVel);
+            // --- Spring correction ---
+            // Compute signed distance error along the chain axis.
+            // We project the separation vector onto the follower's travel direction
+            // to get a signed scalar: positive means follower is ahead of ideal,
+            // negative means it's behind.
+            Vec3 separation = followerPos.subtract(leaderPos);
+            double dist = separation.length();
+            double error = dist - SPACING; // + = too far apart, - = too close
+
+            double speedCorrection = 0.0;
+            if (Math.abs(error) > CORRECTION_THRESHOLD) {
+                double strength = SPRING;
+                if (dist > CATCHUP_THRESHOLD) strength *= 2.0;
+
+                // If too far (error > 0): slow down (negative correction)
+                // If too close (error < 0): speed up (positive correction)
+                // We flip sign because correction should oppose the error.
+                speedCorrection = -error * strength;
+            }
+
+            // --- Apply speed to follower's own direction ---
+            double newSpeed = leaderSpeed + speedCorrection;
+
+            // Clamp to avoid negative speed (reversing direction due to correction).
+            // Followers should never be driven backward by the spring alone.
+            newSpeed = Math.max(0.0, newSpeed);
+
+            follower.setDeltaMovement(followerDir.scale(newSpeed));
 
             current = follower;
         }
     }
 
     // -------------------------------------------------------
-    // Push cancellation
+    // Suppress collision between linked carts
     // -------------------------------------------------------
 
     @Inject(method = "push", at = @At("HEAD"), cancellable = true)
