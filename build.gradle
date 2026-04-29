@@ -110,3 +110,17 @@ tasks.named('jar', Jar).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
+
+tasks.named('processResources').configure {
+    dependsOn('compileJava')
+}
+
+tasks.named('compileJava').configure {
+    doLast {
+        def refmap = file("build/tmp/compileJava/linking_minecarts.refmap.json")
+        def dest = file("build/resources/main/linking_minecarts.refmap.json")
+        if (refmap.exists()) {
+            dest.bytes = refmap.bytes
+        }
+    }
+}
