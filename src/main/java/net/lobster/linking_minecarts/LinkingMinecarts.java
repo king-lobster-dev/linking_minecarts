@@ -1,6 +1,7 @@
 package net.lobster.linking_minecarts;
 
 import net.lobster.linking_minecarts.capability.CartLinkProvider;
+import net.lobster.linking_minecarts.event.CartTickHandler;
 import net.lobster.linking_minecarts.event.InteractionHandler;
 
 import net.minecraft.resources.ResourceLocation;
@@ -24,6 +25,7 @@ public class LinkingMinecarts {
     public LinkingMinecarts() {
         MinecraftForge.EVENT_BUS.register(this);
         MinecraftForge.EVENT_BUS.register(new InteractionHandler());
+        MinecraftForge.EVENT_BUS.register(new CartTickHandler());
     }
 
     @SuppressWarnings("removal")

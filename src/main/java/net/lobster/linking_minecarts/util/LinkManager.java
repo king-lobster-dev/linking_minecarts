@@ -14,15 +14,28 @@ public class LinkManager {
 
     private static final double SEARCH_RADIUS = 3.0;
 
+    // All carts that are part of at least one link.
+    // CartTickHandler iterates this to find chains to process each tick.
+    private static final Set<AbstractMinecart> ACTIVE = new HashSet<>();
+
+    // =========================
+    // PUBLIC API FOR TICK HANDLER
+    // =========================
+
+    /** Returns a snapshot of all currently linked carts. */
+    public static Set<AbstractMinecart> getActiveCarts() {
+        return Collections.unmodifiableSet(ACTIVE);
+    }
+
+    /** Removes carts that have been removed from the world. Called each tick. */
+    public static void cleanActive() {
+        ACTIVE.removeIf(c -> c == null || c.isRemoved());
+    }
+
     // =========================
     // SERIES LINKING
     // =========================
 
-    /**
-     * Finds the proximity path from start → end and links them in series.
-     * `start` is the head of the train (index 0); `end` is the last follower.
-     * Returns the number of new links created, 0 on failure.
-     */
     public static int linkSeries(AbstractMinecart start,
                                  AbstractMinecart end,
                                  ServerLevel level) {
@@ -45,7 +58,6 @@ public class LinkManager {
 
         get(cart).ifPresent(data -> {
 
-            // Clear the back-reference on this cart's leader
             UUID leaderId = data.getLeader();
             if (leaderId != null) {
                 var e = level.getEntity(leaderId);
@@ -56,7 +68,6 @@ public class LinkManager {
                 }
             }
 
-            // Clear the back-reference on this cart's follower
             UUID followerId = data.getFollower();
             if (followerId != null) {
                 var e = level.getEntity(followerId);
@@ -68,6 +79,7 @@ public class LinkManager {
             }
 
             data.clear();
+            ACTIVE.remove(cart);
         });
 
         LinkingMinecarts.LOGGER.info("Unlinked cart: {}", cart.getUUID());
@@ -88,7 +100,6 @@ public class LinkManager {
         visited.add(current.getUUID());
 
         for (int steps = 0; steps < 64; steps++) {
-
             if (current.getUUID().equals(end.getUUID())) return path;
 
             AbstractMinecart next = findNearest(current, visited, level);
@@ -105,7 +116,6 @@ public class LinkManager {
     private static AbstractMinecart findNearest(AbstractMinecart from,
                                                 Set<UUID> visited,
                                                 ServerLevel level) {
-
         AABB box = from.getBoundingBox().inflate(SEARCH_RADIUS);
         List<AbstractMinecart> candidates =
                 level.getEntitiesOfClass(AbstractMinecart.class, box);
@@ -139,12 +149,13 @@ public class LinkManager {
         get(leader).ifPresent(dLeader -> get(follower).ifPresent(dFollower -> {
 
             if (dLeader.isFull() || dFollower.isFull()) return;
-
-            // Prevent double-linking
             if (follower.getUUID().equals(dLeader.getFollower())) return;
 
             dLeader.setFollower(follower.getUUID());
             dFollower.setLeader(leader.getUUID());
+
+            ACTIVE.add(leader);
+            ACTIVE.add(follower);
 
             ok[0] = true;
 
